@@ -16,106 +16,46 @@ The core challenge: only **0.17%** of transactions are fraudulent. That's 492 fr
 
 ## Architecture
 
-### System Overview
-
-```mermaid
-flowchart TB
-    subgraph Data["DATA INGESTION"]
-        CSV["creditcard.csv\n284,807 transactions"]
-        Producer["Producer\n10 TPS"]
-    end
-
-    subgraph Streaming["MESSAGE BROKER"]
-        ZK["Zookeeper\n:2181"]
-        Kafka["Kafka\n:9092\ntopic: transactions"]
-    end
-
-    subgraph Processing["PREDICTION ENGINE"]
-        API["FastAPI\n:8000\n/predict"]
-        Model["XGBoost Model\n300 trees"]
-    end
-
-    subgraph Storage["DATA LAYER"]
-        Redis["Redis\n:6379\nTTL: 1 hour"]
-        PG["PostgreSQL\n:5432\nConnection Pool: 5-20"]
-    end
-
-    subgraph Consumption["STREAM CONSUMER"]
-        Consumer["Consumer\nBatch: 10 msgs"]
-    end
-
-    subgraph Monitoring["OBSERVABILITY"]
-        Prom["Prometheus\n:9090\nScrape: 15s"]
-        Graf["Grafana\n:3000"]
-    end
-
-    CSV --> Producer
-    Producer -->|"publish JSON"| Kafka
-    ZK -.->|"coordination"| Kafka
-    Kafka -->|"poll"| Consumer
-    Consumer -->|"POST /predict"| API
-    API --> Model
-    API <-->|"get/set cache"| Redis
-    API -->|"insert results"| PG
-    API -->|"GET /metrics"| Prom
-    Prom --> Graf
-
-    style Data fill:#1e1e2e,stroke:#89b4fa,color:#cdd6f4
-    style Streaming fill:#1e1e2e,stroke:#fab387,color:#cdd6f4
-    style Processing fill:#1e1e2e,stroke:#a6e3a1,color:#cdd6f4
-    style Storage fill:#1e1e2e,stroke:#f38ba8,color:#cdd6f4
-    style Consumption fill:#1e1e2e,stroke:#cba6f7,color:#cdd6f4
-    style Monitoring fill:#1e1e2e,stroke:#f9e2af,color:#cdd6f4
-```
-
-### Prediction Request Lifecycle
-
-```mermaid
-sequenceDiagram
-    participant P as Producer
-    participant K as Kafka
-    participant C as Consumer
-    participant A as FastAPI
-    participant R as Redis
-    participant DB as PostgreSQL
-
-    P->>K: publish(transaction JSON + UUID)
-    K->>C: poll(batch_size=10)
-    C->>A: POST /predict
-
-    A->>R: GET txn:{transaction_id}
-
-    alt Cache HIT
-        R-->>A: cached result
-        A-->>C: response (~0.1ms)
-    else Cache MISS
-        R-->>A: null
-        Note over A: Scale features (StandardScaler)
-        Note over A: XGBoost predict + predict_proba
-        A->>R: SETEX txn:{id} 3600 result
-        A->>DB: INSERT INTO transactions
-        A-->>C: response (~1.8ms)
-    end
-
-    alt is_fraud = true
-        Note over C: FRAUD ALERT logged to stdout
-    end
-```
-
-### Airflow Retraining Pipeline (Nightly at 2:00 AM)
-
 ```mermaid
 flowchart LR
-    A["extract_data\nPull last 24h\nfrom PostgreSQL"] --> B["retrain_model\nRandomForest\nclass_weight=balanced"]
-    B --> C["evaluate_model\nCalculate F1, Precision\nRecall, ROC-AUC"]
-    C -->|"F1 >= 0.90"| D["deploy_model\nBackup old .pkl\nOverwrite + email alert"]
-    C -->|"F1 < 0.90"| E["BLOCKED\nOld model stays\nEmail failure alert"]
+    CSV[("creditcard.csv")] --> Producer
 
-    style A fill:#1e1e2e,stroke:#89b4fa,color:#cdd6f4
-    style B fill:#1e1e2e,stroke:#a6e3a1,color:#cdd6f4
-    style C fill:#1e1e2e,stroke:#f9e2af,color:#cdd6f4
-    style D fill:#1e1e2e,stroke:#a6e3a1,color:#cdd6f4
-    style E fill:#1e1e2e,stroke:#f38ba8,color:#cdd6f4
+    subgraph Ingestion
+        Producer["Producer"]
+    end
+
+    subgraph Broker
+        ZK["Zookeeper"] -.- Kafka["Kafka"]
+    end
+
+    subgraph Pipeline
+        Consumer["Consumer"]
+    end
+
+    subgraph Inference["Prediction Service"]
+        API["FastAPI"]
+        Model["XGBoost"]
+        API --- Model
+    end
+
+    subgraph Cache
+        Redis[("Redis")]
+    end
+
+    subgraph DB
+        PG[("PostgreSQL")]
+    end
+
+    subgraph Observability
+        Prometheus --> Grafana
+    end
+
+    Producer -->|"stream"| Kafka
+    Kafka -->|"poll"| Consumer
+    Consumer -->|"POST /predict"| API
+    API <-->|"cache"| Redis
+    API -->|"persist"| PG
+    API -->|"/metrics"| Prometheus
 ```
 
 ---
