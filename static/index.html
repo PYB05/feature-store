@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fraud Detection — ML Feature Store</title>
+    <meta name="description" content="Real-time fraud detection dashboard powered by ML Feature Store with Redis caching and Kafka streaming.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2'><path d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/></svg>">
+</head>
+<body>
+    <!-- ═══════════════════════════════════════════════════════
+         TOP BAR
+    ═══════════════════════════════════════════════════════ -->
+    <header class="topbar">
+        <div class="topbar__left">
+            <div class="topbar__logo">
+                <svg class="topbar__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                </svg>
+                <span class="topbar__title">Fraud Detection</span>
+            </div>
+            <span class="topbar__subtitle">ML Feature Store</span>
+        </div>
+        <div class="topbar__right">
+            <div class="topbar__status" id="connection-status">
+                <span class="status-dot status-dot--connecting"></span>
+                <span class="status-label">Connecting…</span>
+            </div>
+            <span class="topbar__time" id="clock"></span>
+        </div>
+    </header>
+
+    <main class="dashboard">
+        <!-- ═══════════════════════════════════════════════════
+             METRIC CARDS
+        ═══════════════════════════════════════════════════ -->
+        <section class="metrics" aria-label="Key Metrics">
+            <div class="metric-card" id="card-predictions">
+                <div class="metric-card__header">
+                    <span class="metric-card__label">Total Predictions</span>
+                    <svg class="metric-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                </div>
+                <div class="metric-card__value" id="total-predictions">—</div>
+                <div class="metric-card__footer" id="predictions-rate">Waiting for data…</div>
+            </div>
+
+            <div class="metric-card metric-card--danger" id="card-fraud">
+                <div class="metric-card__header">
+                    <span class="metric-card__label">Fraud Detected</span>
+                    <svg class="metric-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </div>
+                <div class="metric-card__value" id="total-frauds">—</div>
+                <div class="metric-card__footer" id="fraud-rate">—</div>
+            </div>
+
+            <div class="metric-card metric-card--accent" id="card-latency">
+                <div class="metric-card__header">
+                    <span class="metric-card__label">Avg Latency</span>
+                    <svg class="metric-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </div>
+                <div class="metric-card__value" id="avg-latency">—</div>
+                <div class="metric-card__footer">Target: &lt; 2ms</div>
+            </div>
+
+            <div class="metric-card metric-card--success" id="card-cache">
+                <div class="metric-card__header">
+                    <span class="metric-card__label">Cache Hit Rate</span>
+                    <svg class="metric-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                </div>
+                <div class="metric-card__value" id="cache-rate">—</div>
+                <div class="metric-card__footer">Redis vs PostgreSQL</div>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════
+             SYSTEM HEALTH + BENCHMARK
+        ═══════════════════════════════════════════════════ -->
+        <section class="panels">
+            <div class="panel panel--health">
+                <h2 class="panel__title">System Health</h2>
+                <div class="health-grid" id="health-grid">
+                    <div class="health-item" id="health-model">
+                        <span class="health-dot health-dot--unknown"></span>
+                        <span class="health-name">ML Model</span>
+                        <span class="health-status">—</span>
+                    </div>
+                    <div class="health-item" id="health-scaler">
+                        <span class="health-dot health-dot--unknown"></span>
+                        <span class="health-name">Scaler</span>
+                        <span class="health-status">—</span>
+                    </div>
+                    <div class="health-item" id="health-redis">
+                        <span class="health-dot health-dot--unknown"></span>
+                        <span class="health-name">Redis Cache</span>
+                        <span class="health-status">—</span>
+                    </div>
+                    <div class="health-item" id="health-postgres">
+                        <span class="health-dot health-dot--unknown"></span>
+                        <span class="health-name">PostgreSQL</span>
+                        <span class="health-status">—</span>
+                    </div>
+                    <div class="health-item" id="health-api">
+                        <span class="health-dot health-dot--unknown"></span>
+                        <span class="health-name">API Server</span>
+                        <span class="health-status">—</span>
+                    </div>
+                </div>
+                <div class="health-footer">
+                    <span class="health-footer__text" id="db-count">—</span>
+                </div>
+            </div>
+
+            <div class="panel panel--benchmark">
+                <h2 class="panel__title">Latency Benchmark</h2>
+                <div class="benchmark" id="benchmark-content">
+                    <p class="benchmark__hint">Click below to run 1,000 Redis vs PostgreSQL operations</p>
+                    <button class="btn btn--benchmark" id="btn-benchmark" onclick="runBenchmark()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                        Run Benchmark
+                    </button>
+                </div>
+                <div class="benchmark-results" id="benchmark-results" style="display:none;">
+                    <div class="benchmark-bar">
+                        <div class="benchmark-bar__label">
+                            <span class="benchmark-bar__name">Redis</span>
+                            <span class="benchmark-bar__value" id="redis-ms">—</span>
+                        </div>
+                        <div class="benchmark-bar__track">
+                            <div class="benchmark-bar__fill benchmark-bar__fill--redis" id="redis-bar"></div>
+                        </div>
+                    </div>
+                    <div class="benchmark-bar">
+                        <div class="benchmark-bar__label">
+                            <span class="benchmark-bar__name">PostgreSQL</span>
+                            <span class="benchmark-bar__value" id="postgres-ms">—</span>
+                        </div>
+                        <div class="benchmark-bar__track">
+                            <div class="benchmark-bar__fill benchmark-bar__fill--pg" id="pg-bar"></div>
+                        </div>
+                    </div>
+                    <div class="benchmark-verdict" id="benchmark-verdict">—</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════
+             LIVE TRANSACTION FEED
+        ═══════════════════════════════════════════════════ -->
+        <section class="panel panel--feed">
+            <div class="panel__header">
+                <h2 class="panel__title">Live Transaction Feed</h2>
+                <div class="panel__controls">
+                    <span class="live-dot"></span>
+                    <span class="live-label">LIVE</span>
+                    <span class="feed-count" id="feed-count">0 transactions</span>
+                </div>
+            </div>
+            <div class="feed-table-wrap">
+                <table class="feed-table" id="feed-table">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Transaction ID</th>
+                            <th>Amount</th>
+                            <th>Confidence</th>
+                            <th>Latency</th>
+                            <th>Source</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="feed-body">
+                        <tr class="feed-empty">
+                            <td colspan="7">Waiting for transactions…</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <span>ML Feature Store — Fraud Detection System</span>
+        <span class="footer__sep">·</span>
+        <a href="/docs" class="footer__link" target="_blank">API Docs</a>
+        <span class="footer__sep">·</span>
+        <a href="/metrics" class="footer__link" target="_blank">Metrics</a>
+        <span class="footer__sep">·</span>
+        <span>FastAPI + Redis + PostgreSQL + Kafka</span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

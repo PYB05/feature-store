@@ -1,0 +1,357 @@
+# ==============================================================
+# ML Feature Store — Docker Compose
+# ==============================================================
+# Boots all 9 services with a single command:
+#   docker compose up --build
+#
+# Services (in startup order):
+#   1. zookeeper   — Kafka coordination service
+#   2. kafka        — Message broker for real-time streaming
+#   3. postgresql   — Persistent storage for fraud results
+#   4. redis        — Sub-millisecond cache layer
+#   5. api          — FastAPI fraud prediction service
+#   6. producer     — Streams CSV transactions into Kafka
+#   7. consumer     — Reads Kafka, calls API, stores results
+#   8. prometheus   — Scrapes /metrics every 15s
+#   9. grafana      — Visualizes Prometheus data
+#
+# All services share the 'fraud-network' bridge network.
+# Credentials are passed via environment variables (never hardcoded).
+# ==============================================================
+
+# ==============================================================
+# Shared environment variables for PostgreSQL credentials.
+# Referenced with YAML anchors (&pg_env / *pg_env) to avoid
+# copy-pasting the same block into every service that needs DB access.
+# ==============================================================
+x-postgres-env: &pg_env
+  DB_HOST:     postgresql
+  DB_PORT:     "5432"
+  DB_NAME:     frauddb
+  DB_USER:     frauduser
+  DB_PASSWORD: fraudpass
+
+services:
+
+  # ============================================================
+  # 1. ZOOKEEPER
+  # Kafka requires Zookeeper for cluster coordination (leader
+  # election, topic metadata, consumer group offsets).
+  # ============================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: fraud_zookeeper
+    hostname: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME:   2000
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN   # Suppress verbose Zookeeper logs
+    networks:
+      - fraud-network
+    healthcheck:
+      # zkServer.sh is always present in the Confluent Zookeeper image.
+      # 'status' returns 0 when ZK is running, non-zero otherwise.
+      test:     ["CMD", "bash", "-c", "/usr/bin/zookeeper-shell localhost:2181 ls /"]      
+      interval: 15s
+      timeout:  10s
+      retries:  10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ============================================================
+  # 2. KAFKA
+  # The central message bus. Receives transactions from the
+  # producer and delivers them to the consumer.
+  # ============================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: fraud_kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    depends_on:
+      zookeeper:
+        condition: service_healthy   # Wait for Zookeeper to be truly ready
+    environment:
+      KAFKA_BROKER_ID:                        1
+      KAFKA_ZOOKEEPER_CONNECT:                zookeeper:2181
+
+      # Two listeners:
+      #   PLAINTEXT      → used by services inside Docker (kafka:29092)
+      #   PLAINTEXT_HOST → used by clients on your host machine (localhost:9092)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:   PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS:             PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS:                        PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME:       PLAINTEXT
+
+      # Single-broker setup — replication factor must be 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE:        "true"   # Auto-create 'transactions' topic
+      KAFKA_LOG4J_ROOT_LOGLEVEL:              WARN     # Suppress verbose Kafka logs
+
+      # Retention: keep messages for 24 hours (covers one Airflow retraining cycle)
+      KAFKA_LOG_RETENTION_HOURS:              24
+    networks:
+      - fraud-network
+    healthcheck:
+      # Use internal port 29092 (PLAINTEXT listener) for broker-to-broker checks
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - "kafka-topics --bootstrap-server localhost:29092 --list"
+      interval: 15s
+      timeout:  10s
+      retries:  15
+      start_period: 45s
+    restart: unless-stopped
+
+  # ============================================================
+  # 3. POSTGRESQL
+  # Stores every fraud prediction result permanently.
+  # The transactions table is auto-created by db.py on first run.
+  # ============================================================
+  postgresql:
+    image: postgres:15
+    container_name: fraud_postgresql
+    hostname: postgresql
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB:       frauddb
+      POSTGRES_USER:     frauduser
+      POSTGRES_PASSWORD: fraudpass
+    volumes:
+      # Persist database files across container restarts
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - fraud-network
+    healthcheck:
+      # pg_isready checks if PostgreSQL is accepting connections
+      test:     ["CMD-SHELL", "pg_isready -U frauduser -d frauddb"]
+      interval: 10s
+      timeout:  5s
+      retries:  10
+      start_period: 15s
+    restart: unless-stopped
+
+  # ============================================================
+  # 4. REDIS
+  # In-memory cache that stores prediction results by
+  # transaction_id with a 1-hour TTL.
+  # Delivers sub-millisecond reads vs ~5ms for PostgreSQL.
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: fraud_redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    # Persist Redis data to disk so cache survives restarts
+    command: redis-server --appendonly yes --loglevel warning
+    volumes:
+      - redis_data:/data
+    networks:
+      - fraud-network
+    healthcheck:
+      test:     ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout:  5s
+      retries:  10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ============================================================
+  # 5. API (FastAPI Fraud Detection Service)
+  # The heart of the system. Loads the trained model and
+  # serves real-time predictions via HTTP.
+  # Built from the local Dockerfile.
+  # ============================================================
+  api:
+    build:
+      context:    .
+      dockerfile: Dockerfile
+    container_name: fraud_api
+    hostname: api
+    ports:
+      - "8000:8000"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Redis connection
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+
+      # PostgreSQL connection (using YAML anchor)
+      <<: *pg_env
+
+      # Model file paths inside the container
+      MODEL_PATH:  models/fraud_model.pkl
+      SCALER_PATH: models/scaler.pkl
+
+      # Kafka (for any direct publishing the API might do)
+      KAFKA_BROKER: kafka:29092
+    volumes:
+      # Mount the local models/ folder into the container.
+      # This means: when Airflow retrains the model and saves it
+      # to models/fraud_model.pkl on the HOST, the API container
+      # sees the new file immediately on its next restart.
+      - ./models:/app/models
+    networks:
+      - fraud-network
+    healthcheck:
+      test:         ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval:     15s
+      timeout:      10s
+      retries:      10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ============================================================
+  # 6. PRODUCER
+  # Reads creditcard.csv and streams 10 transactions/sec
+  # into the Kafka 'transactions' topic.
+  # ============================================================
+  producer:
+    build:
+      context:    .
+      dockerfile: Dockerfile
+    container_name: fraud_producer
+    # Override the default CMD to run producer.py instead of api.py
+    command: python src/producer.py
+    depends_on:
+      kafka:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: kafka:29092
+      KAFKA_TOPIC:  transactions
+      DATA_PATH:    data/creditcard.csv
+      STREAM_RATE:  "10"
+    volumes:
+      # Mount the data folder so producer can read creditcard.csv
+      - ./data:/app/data
+    networks:
+      - fraud-network
+    restart: on-failure   # Restart if it crashes (not when it finishes normally)
+
+  # ============================================================
+  # 7. CONSUMER
+  # Subscribes to 'transactions' topic, calls /predict on each
+  # message, and prints FRAUD ALERTs to the console.
+  # ============================================================
+  consumer:
+    build:
+      context:    .
+      dockerfile: Dockerfile
+    container_name: fraud_consumer
+    command: python src/consumer.py
+    depends_on:
+      kafka:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: kafka:29092
+      KAFKA_TOPIC:  transactions
+      API_URL:      http://api:8000
+      <<: *pg_env
+    networks:
+      - fraud-network
+    restart: unless-stopped
+
+  # ============================================================
+  # 8. PROMETHEUS
+  # Scrapes the /metrics endpoint of the API every 15 seconds
+  # and stores time-series data for Grafana to query.
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fraud_prometheus
+    hostname: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      # Mount our custom scrape config
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"   # Keep 7 days of metrics
+      - "--web.enable-lifecycle"              # Allow hot-reload via HTTP POST
+    networks:
+      - fraud-network
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # 9. GRAFANA
+  # Visualizes Prometheus metrics on beautiful dashboards.
+  # Pre-configured with Prometheus as a datasource.
+  # Default login: admin / admin
+  # ============================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fraud_grafana
+    hostname: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Default credentials (change in production!)
+      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+
+      # Pre-configure Prometheus as a datasource via environment variable.
+      # This means you don't need to manually add it in the Grafana UI.
+      GF_DATASOURCES_DEFAULT_NAME: Prometheus
+      GF_DATASOURCES_DEFAULT_TYPE: prometheus
+      GF_DATASOURCES_DEFAULT_URL:  http://prometheus:9090
+      GF_DATASOURCES_DEFAULT_ACCESS: proxy
+      GF_DATASOURCES_DEFAULT_IS_DEFAULT: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - fraud-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+
+# ==============================================================
+# Named Volumes
+# Volumes persist data across 'docker compose down' restarts.
+# Use 'docker compose down -v' to delete volumes and start fresh.
+# ==============================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+
+# ==============================================================
+# Networks
+# All services share one bridge network called 'fraud-network'.
+# This means services can reach each other by hostname
+# (e.g., 'kafka', 'redis', 'api') instead of IP addresses.
+# ==============================================================
+networks:
+  fraud-network:
+    driver: bridge
+    name: fraud-network
