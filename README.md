@@ -339,13 +339,13 @@ Open [localhost:8080](http://localhost:8080) and enable the `fraud_model_retrain
 
 ### Caching strategy
 
-Redis stores prediction results keyed by `txn:{transaction_id}` with a 1-hour TTL. On a cache hit, the API returns instantly without touching the model or database. The benchmark endpoint shows this consistently delivers ~12x faster reads than PostgreSQL.
+Redis stores prediction results keyed by `txn:{transaction_id}` with a 1-hour TTL. On a cache hit, the API returns instantly without touching the model or database. The benchmark endpoint shows this consistently delivers ~12x faster reads than PostgreSQL .
 
 The cache is write-through: every prediction writes to both Redis and PostgreSQL. Redis handles the hot path, PostgreSQL is the source of truth.
 
 ### Connection pooling
 
-The `DatabaseManager` in `db.py` uses `psycopg2.pool.SimpleConnectionPool` with 5-20 connections. Each query borrows a connection via a context manager and returns it immediately. This eliminates per-query connection overhead, which is the primary bottleneck in single-connection setups.
+The `DatabaseManager` in `db.py` uses `psycopg2.pool.SimpleConnectionPool` with 5-20 connections. Each query borrows a connection via a context manager and returns it immediately. This eliminates per-query connection overhead, which is the primary bottleneck in single-connection setups .
 
 ### Kafka configuration
 
@@ -355,7 +355,7 @@ The `DatabaseManager` in `db.py` uses `psycopg2.pool.SimpleConnectionPool` with 
 
 ### Dockerfile
 
-Single image serves all three Python services (API, producer, consumer). Docker Compose overrides the `CMD` for producer and consumer. Built on `python:3.11-slim`, runs as non-root user (`appuser`), and includes container-level health checks separate from the compose-level ones.
+Single image serves all three Python services (API, producer, consumer). Docker Compose overrides the `CMD` for producer and consumer. Built on `python:3.11-slim`, runs as non-root user (`appuser`), and includes container-level health checks separate from the compose-level ones .
 
 ### Error handling
 
